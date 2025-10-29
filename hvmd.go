@@ -13,7 +13,7 @@ import (
 )
 
 var coreEnabled bool
-var sshKeyString string = "real.key"
+var sshKeyString string = ".key"
 
 func main() {
 	// Check if --core is the LAST argument
