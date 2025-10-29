@@ -34,3 +34,5 @@ Thumbs.db
 ssh.key
 real.key
 ssh.key.pub
+
+push.py
