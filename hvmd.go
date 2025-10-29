@@ -481,7 +481,7 @@ func showHelp(coreMode bool) {
 	fmt.Println("  ping      - Show current Postgres server time")
 	fmt.Println("  admins    - List all DB admin users (SUPERUSER or CREATEROLE)")
 	fmt.Println("  help      - Show this help message")
-	fmt.Println("  readdb    - Show database tables and column names (limited for non-core)")
+	fmt.Println("  readdb    - Show database tables and column names")
 	fmt.Println("")
 	if coreMode {
 		fmt.Println("☢️  ··························································☢️")
