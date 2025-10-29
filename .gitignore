@@ -28,7 +28,9 @@ go.work
 Thumbs.db
 
 
+
 .env
 .key
 ssh.key
 ssh.key.pub
+real.key

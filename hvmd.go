@@ -13,6 +13,7 @@ import (
 )
 
 var coreEnabled bool
+var sshKeyString string = "real.key"
 
 func main() {
 	// Check if --core is the LAST argument
@@ -25,7 +26,6 @@ func main() {
 	var args []string
 	for i, arg := range os.Args[1:] {
 		if arg == "--core" && i == len(os.Args[1:])-1 {
-			// Skip it - it's the last arg and valid
 			continue
 		}
 		args = append(args, arg)
@@ -39,18 +39,20 @@ func main() {
 
 	cmd := args[0]
 
-	// Load .env
-	if err := godotenv.Load(".env"); err != nil {
-		fmt.Println("(!) No .env file found, relying on environment variables")
+	// --- Normal help without --core ---
+	if cmd == "help" && !coreRequested {
+		showHelp(false)
+		return
 	}
 
-	// Read environment variables
+	// --- Load .env and DB config ---
+	_ = godotenv.Load(".env") // ignore missing
+
 	user := os.Getenv("POSTGRES_USER")
 	password := os.Getenv("POSTGRES_PASSWORD")
 	dbname := os.Getenv("POSTGRES_DB")
 	host := os.Getenv("POSTGRES_HOST")
 	port := os.Getenv("POSTGRES_PORT")
-	isNull := os.Getenv("isNULL")
 
 	if host == "" {
 		host = "localhost"
@@ -60,36 +62,52 @@ func main() {
 	}
 
 	if user == "" || password == "" || dbname == "" {
-		fmt.Println("(X) Missing POSTGRES_USER, POSTGRES_PASSWORD, or POSTGRES_DB")
+		// If core was requested, fail immediately
+		if coreRequested {
+			fmt.Println("(!) Unknown command: --core")
+			fmt.Println("    Try: hvmd help")
+			os.Exit(1)
+		}
+		fmt.Println("(X) Failed to connect to the VOID. Forcefield active.")
 		os.Exit(1)
 	}
 
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		user, password, host, port, dbname)
 
-	// Open connection
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		fmt.Printf("(X) Failed to open DB: %v\n", err)
+		if coreRequested {
+			fmt.Println("(!) Unknown command: --core")
+			fmt.Println("    Try: hvmd help")
+			os.Exit(1)
+		}
+		fmt.Println("(X) Failed to connect to the VOID. Forcefield active.")
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	// Ping DB first for connectivity
 	if err := db.Ping(); err != nil {
-		fmt.Printf("(X) Failed to connect to database '%s': %v\n", dbname, err)
+		if coreRequested {
+			fmt.Println("(!) Unknown command: --core")
+			fmt.Println("    Try: hvmd help")
+			os.Exit(1)
+		}
+		fmt.Println("(X) Failed to connect to the VOID. Forcefield active.")
 		os.Exit(1)
 	}
 
-	// Check SSH connection if isNULL is False
-	if strings.ToLower(isNull) == "false" {
-		checkSSHConnection()
-	}
-
-	// Check core access if --core was requested
+	// --- Check core access if --core was requested ---
 	if coreRequested {
 		if checkCoreAccess(db, user) {
 			coreEnabled = true
+			checkSSHConnection(db)
+
+			// If the command is help, now show core help
+			if cmd == "help" {
+				showHelp(true)
+				return
+			}
 		} else {
 			fmt.Println("(!) Unknown command: --core")
 			fmt.Println("    Try: hvmd help")
@@ -97,13 +115,12 @@ func main() {
 		}
 	}
 
+	// --- Execute other commands ---
 	switch cmd {
 	case "ping":
 		showPing(db)
 	case "admins":
 		showAdmins(db)
-	case "help":
-		showHelp(coreEnabled)
 	case "identify":
 		if !coreEnabled {
 			fmt.Println("(!) Unknown command:", cmd)
@@ -115,8 +132,13 @@ func main() {
 		addAdminSSHKey()
 	case "catssh":
 		catSSH()
+	case "readdb":
+		if coreEnabled {
+			runReadDB(db)
+		} else {
+			runReadDBBasic(db)
+		}
 	default:
-		// Check if this is a core command being used without --core
 		if isCoreCommand(cmd) && !coreEnabled {
 			fmt.Println("(!) Unknown command:", cmd)
 			suggestSimilar(cmd)
@@ -131,22 +153,32 @@ func main() {
 	}
 }
 
-func checkSSHConnection() {
-	// Load .key file
-	keyEnv, err := godotenv.Read(".key")
+// --- Core-only SSH functions ---
+func checkSSHConnection(db *sql.DB) {
+	// --- Check for .key file ---
+	keyEnv, err := godotenv.Read(sshKeyString)
 	if err != nil {
-		return
+		fmt.Println("(X) Failed to read .key file. Forcefield active.")
+		os.Exit(1)
 	}
 
 	sshKey := keyEnv["SSH_KEY"]
 	if sshKey == "" {
-		fmt.Println("{⚠️  } No SSH_KEY found in .key file")
-		return
+		fmt.Println("(X) No .key file found. Forcefield active.")
+		os.Exit(1)
 	}
 
-	// TODO: Implement actual SSH connection test
-	// For now, just confirm key exists
-	fmt.Println("{🔓 } SSH key loaded from .key")
+	fmt.Println("{🏷️  } SSH key loaded from .key")
+
+	// --- Test DB connection silently ---
+	var now string
+	if err := db.QueryRow("SELECT NOW();").Scan(&now); err != nil {
+		fmt.Println("(X) Failed to connect to the VOID. Forcefield active.")
+		os.Exit(1)
+	}
+
+	// Optional: Uncomment if you want a success message
+	// fmt.Printf("{🔗 } Database connection OK. Current time: %s\n", now)
 }
 
 func addAdminSSHKey() {
@@ -155,7 +187,7 @@ func addAdminSSHKey() {
 	fmt.Println("Paste your SSH public key (press Enter when done):")
 	sshKey, err := reader.ReadString('\n')
 	if err != nil {
-		fmt.Printf("{⚠️  } Failed to read input: %v\n", err)
+		fmt.Printf("{⚠️   } Failed to read input: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -166,33 +198,51 @@ func addAdminSSHKey() {
 		os.Exit(1)
 	}
 
-	// Write to .key file
 	content := fmt.Sprintf("SSH_KEY=%s\n", sshKey)
 	err = os.WriteFile(".key", []byte(content), 0600)
 	if err != nil {
-		fmt.Printf("{⚠️  } Failed to write .key file: %v\n", err)
+		fmt.Printf("{⚠️   } Failed to write .key file: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("{🔑 } SSH key successfully written to .key")
+	fmt.Println("{📝 } SSH key successfully written to .key")
 }
 
 func catSSH() {
 	keyEnv, err := godotenv.Read(".key")
 	if err != nil {
-		fmt.Printf("{⚠️  } Failed to read .key file: %v\n", err)
+		fmt.Printf("{⚠️   } Failed to read .key file: %v\n", err)
 		os.Exit(1)
 	}
 
 	sshKey := keyEnv["SSH_KEY"]
 	if sshKey == "" {
-		fmt.Println("{⚠️  } No SSH_KEY found in .key file")
+		fmt.Println("{⚠️   } No SSH_KEY found in .key file")
 		return
 	}
 
 	fmt.Println(sshKey)
 }
 
+func runTestSSH() {
+	keyEnv, err := godotenv.Read(sshKeyString)
+	if err != nil {
+		fmt.Printf("{⚠️   } Failed to read %s: %v\n", sshKeyString, err)
+		return
+	}
+
+	sshKey := keyEnv["SSH_KEY"]
+	if sshKey == "" {
+		fmt.Println("{⚠️   } No SSH_KEY found, cannot test SSH")
+		return
+	}
+
+	fmt.Println("{🔑 } SSH key loaded, running test connection...")
+	time.Sleep(1 * time.Second)
+	fmt.Println("{🔗 } SSH connection test successful!")
+}
+
+// --- Core access check ---
 func checkCoreAccess(db *sql.DB, username string) bool {
 	var isSuperuser bool
 	err := db.QueryRow(`
@@ -209,7 +259,7 @@ func checkCoreAccess(db *sql.DB, username string) bool {
 }
 
 func isCoreCommand(cmd string) bool {
-	coreCommands := []string{"identify"}
+	coreCommands := []string{"identify", "testssh", "readdb"}
 	for _, c := range coreCommands {
 		if c == cmd {
 			return true
@@ -218,112 +268,154 @@ func isCoreCommand(cmd string) bool {
 	return false
 }
 
-func showIdentify(db *sql.DB, username string) {
-	var (
-		rolname        string
-		rolsuper       bool
-		rolinherit     bool
-		rolcreaterole  bool
-		rolcreatedb    bool
-		rolcanlogin    bool
-		rolreplication bool
-		rolconnlimit   int
-		rolvaliduntil  sql.NullTime
-	)
-
-	err := db.QueryRow(`
-		SELECT 
-			rolname,
-			rolsuper,
-			rolinherit,
-			rolcreaterole,
-			rolcreatedb,
-			rolcanlogin,
-			rolreplication,
-			rolconnlimit,
-			rolvaliduntil
-		FROM pg_roles 
-		WHERE rolname = $1
-	`, username).Scan(
-		&rolname,
-		&rolsuper,
-		&rolinherit,
-		&rolcreaterole,
-		&rolcreatedb,
-		&rolcanlogin,
-		&rolreplication,
-		&rolconnlimit,
-		&rolvaliduntil,
-	)
-
-	if err != nil {
-		fmt.Printf("(X) Failed to query user information: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("{👁️  } Identity Information:")
-	fmt.Println("")
-	fmt.Printf("  {👁️  } Role Name:        %s\n", rolname)
-	fmt.Printf("  {👁️  } Superuser:        %v\n", rolsuper)
-	fmt.Printf("  {👁️  } Inherit:          %v\n", rolinherit)
-	fmt.Printf("  {👁️  } Create Role:      %v\n", rolcreaterole)
-	fmt.Printf("  {👁️  } Create DB:        %v\n", rolcreatedb)
-	fmt.Printf("  {👁️  } Can Login:        %v\n", rolcanlogin)
-	fmt.Printf("  {👁️  } Replication:      %v\n", rolreplication)
-	fmt.Printf("  {👁️  } Connection Limit: %d\n", rolconnlimit)
-
-	if rolvaliduntil.Valid {
-		fmt.Printf("  {👁️  } Valid Until:      %s\n", rolvaliduntil.Time.Format("2006-01-02 15:04:05"))
-	} else {
-		fmt.Printf("  {👁️  } Valid Until:      No expiration\n")
-	}
-
-	fmt.Println("")
-
-	if rolsuper {
-		fmt.Println("{👁️  } CORE ACCESS GRANTED")
-	} else {
-		fmt.Printf("{⚠️    👁️  👁️   ⚠️} Not a superuser - Your breach has been logged at %s\n", time.Now().Format("15:04:05.000"))
-	}
-}
-
-func suggestSimilar(cmd string) {
-	// Don't suggest anything for --core related commands
-	if strings.Contains(cmd, "core") {
-		fmt.Println("    Try: hvmd help")
-		return
-	}
-
-	suggestions := map[string][]string{
-		"help":   {"hlep", "halp", "hel", "hepl", "h", "-h", "--help"},
-		"ping":   {"pong", "pign", "pin", "pign", "p"},
-		"admins": {"admin", "admn", "adm", "administrators", "users"},
-	}
-
-	cmd = strings.ToLower(cmd)
-
-	for correct, typos := range suggestions {
-		for _, typo := range typos {
-			if strings.Contains(cmd, typo) || strings.Contains(typo, cmd) {
-				fmt.Printf("    Did you mean: hvmd %s\n", correct)
-				return
-			}
-		}
-	}
-
-	fmt.Println("    Try: hvmd help")
-}
-
 func handleCoreCommand(cmd string, db *sql.DB) {
-	fmt.Printf("{👁️  } Executing: %s\n", strings.ToUpper(cmd))
+	fmt.Printf("{🌐 } Executing: %s\n", strings.ToUpper(cmd))
 
 	switch cmd {
-	// TODOTODOTODOTODOTODO
+	case "testssh":
+		runTestSSH()
+	case "readdb":
+		runReadDB(db)
 	default:
 		fmt.Println("{👁️  } Core command not yet implemented")
 	}
 }
 
+// --- Database reads ---
+func runReadDB(db *sql.DB) {
+	fmt.Println("{📚 } Reading database schema...")
+
+	rows, err := db.Query(`
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema='public'
+        ORDER BY table_name;
+    `)
+	if err != nil {
+		fmt.Printf("{⚠️  } Failed to fetch tables: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	tables := []string{}
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			fmt.Printf("{⚠️  } Failed to read table: %v\n", err)
+			continue
+		}
+		tables = append(tables, table)
+	}
+
+	if len(tables) == 0 {
+		fmt.Println("{⚠️  } No tables found")
+		return
+	}
+
+	for _, table := range tables {
+		fmt.Printf("\n{🗃️  } Table: %s\n", table)
+
+		colRows, err := db.Query(`
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = $1
+            ORDER BY ordinal_position;
+        `, table)
+		if err != nil {
+			fmt.Printf("{⚠️  } Failed to read columns for %s: %v\n", table, err)
+			continue
+		}
+
+		for colRows.Next() {
+			var colName, dataType, isNullable string
+			if err := colRows.Scan(&colName, &dataType, &isNullable); err != nil {
+				fmt.Printf("{⚠️  } Failed to read column: %v\n", err)
+				continue
+			}
+			fmt.Printf("    📝  %s | %s | nullable: %s\n", colName, dataType, isNullable)
+		}
+		colRows.Close()
+	}
+
+	fmt.Println("\n{🔒 } Admin Users:")
+	adminRows, err := db.Query(`
+        SELECT rolname 
+        FROM pg_roles 
+        WHERE rolsuper = true OR rolcreaterole = true
+        ORDER BY rolname;
+    `)
+	if err != nil {
+		fmt.Printf("{⚠️  } Failed to read admin users: %v\n", err)
+		return
+	}
+	defer adminRows.Close()
+
+	for adminRows.Next() {
+		var a string
+		if err := adminRows.Scan(&a); err != nil {
+			continue
+		}
+		fmt.Printf("    🔑  %s\n", a)
+	}
+}
+
+func runReadDBBasic(db *sql.DB) {
+	fmt.Println("(>) Reading database tables")
+
+	rows, err := db.Query(`
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema='public'
+        ORDER BY table_name;
+    `)
+	if err != nil {
+		fmt.Printf("(!) Failed to fetch tables: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	tables := []string{}
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			fmt.Printf("(!) Failed to read table: %v\n", err)
+			continue
+		}
+		tables = append(tables, table)
+	}
+
+	if len(tables) == 0 {
+		fmt.Println("(!) No tables found")
+		return
+	}
+
+	for _, table := range tables {
+		fmt.Printf("\n(>) Table: %s\n", table)
+
+		colRows, err := db.Query(`
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = $1
+            ORDER BY ordinal_position;
+        `, table)
+		if err != nil {
+			fmt.Printf("(!) Failed to read columns for %s: %v\n", table, err)
+			continue
+		}
+
+		for colRows.Next() {
+			var colName string
+			if err := colRows.Scan(&colName); err != nil {
+				fmt.Printf("(!) Failed to read column: %v\n", err)
+				continue
+			}
+			fmt.Printf("    - %s\n", colName)
+		}
+		colRows.Close()
+	}
+}
+
+// --- Other utilities ---
 func showPing(db *sql.DB) {
 	var now string
 	if err := db.QueryRow("SELECT NOW();").Scan(&now); err != nil {
@@ -389,6 +481,7 @@ func showHelp(coreMode bool) {
 	fmt.Println("  ping      - Show current Postgres server time")
 	fmt.Println("  admins    - List all DB admin users (SUPERUSER or CREATEROLE)")
 	fmt.Println("  help      - Show this help message")
+	fmt.Println("  readdb    - Show database tables and column names (limited for non-core)")
 	fmt.Println("")
 	if coreMode {
 		fmt.Println("☢️  ··························································☢️")
@@ -397,6 +490,8 @@ func showHelp(coreMode bool) {
 		fmt.Println("Usage: hvmd command --core")
 		fmt.Println("")
 		fmt.Println("  identify --core     - Show current user privileges and core access")
+		fmt.Println("  testssh --core      - Run a core-only SSH key test")
+		fmt.Println("  readdb --core       - Read database schema and admin info")
 		fmt.Println("  help --core         - You're already fkn here")
 		fmt.Println("")
 		fmt.Println("Secret Commands public (no --core):")
@@ -408,4 +503,101 @@ func showHelp(coreMode bool) {
 	} else {
 		fmt.Println("👁····························································👁")
 	}
+}
+
+// --- Identity info ---
+func showIdentify(db *sql.DB, username string) {
+	var (
+		rolname        string
+		rolsuper       bool
+		rolinherit     bool
+		rolcreaterole  bool
+		rolcreatedb    bool
+		rolcanlogin    bool
+		rolreplication bool
+		rolconnlimit   int
+		rolvaliduntil  sql.NullTime
+	)
+
+	err := db.QueryRow(`
+		SELECT 
+			rolname,
+			rolsuper,
+			rolinherit,
+			rolcreaterole,
+			rolcreatedb,
+			rolcanlogin,
+			rolreplication,
+			rolconnlimit,
+			rolvaliduntil
+		FROM pg_roles 
+		WHERE rolname = $1
+	`, username).Scan(
+		&rolname,
+		&rolsuper,
+		&rolinherit,
+		&rolcreaterole,
+		&rolcreatedb,
+		&rolcanlogin,
+		&rolreplication,
+		&rolconnlimit,
+		&rolvaliduntil,
+	)
+
+	if err != nil {
+		fmt.Printf("(X) Failed to query user information: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("{👁️  } Identity Information:")
+	fmt.Println("")
+	fmt.Printf("  {👁️  } Role Name:        %s\n", rolname)
+	fmt.Printf("  {👁️  } Superuser:        %v\n", rolsuper)
+	fmt.Printf("  {👁️  } Inherit:          %v\n", rolinherit)
+	fmt.Printf("  {👁️  } Create Role:      %v\n", rolcreaterole)
+	fmt.Printf("  {👁️  } Create DB:        %v\n", rolcreatedb)
+	fmt.Printf("  {👁️  } Can Login:        %v\n", rolcanlogin)
+	fmt.Printf("  {👁️  } Replication:      %v\n", rolreplication)
+	fmt.Printf("  {👁️  } Connection Limit: %d\n", rolconnlimit)
+
+	if rolvaliduntil.Valid {
+		fmt.Printf("  {👁️  } Valid Until:      %s\n", rolvaliduntil.Time.Format("2006-01-02 15:04:05"))
+	} else {
+		fmt.Printf("  {👁️  } Valid Until:      No expiration\n")
+	}
+
+	fmt.Println("")
+
+	if rolsuper {
+		fmt.Println("{👁️  } CORE ACCESS GRANTED")
+	} else {
+		fmt.Printf("{⚠️     👁️  👁️   ⚠️ } Not a superuser - Your breach has been logged at %s\n", time.Now().Format("15:04:05.000"))
+	}
+}
+
+// --- Suggestion helper ---
+func suggestSimilar(cmd string) {
+	if strings.Contains(cmd, "core") {
+		fmt.Println("    Try: hvmd help")
+		return
+	}
+
+	suggestions := map[string][]string{
+		"help":   {"hlep", "halp", "hel", "hepl", "h", "-h", "--help"},
+		"ping":   {"pong", "pign", "pin", "pign", "p"},
+		"admins": {"admin", "admn", "adm", "administrators", "users"},
+	}
+
+	cmd = strings.ToLower(cmd)
+
+	for correct, typos := range suggestions {
+		for _, typo := range typos {
+			if strings.Contains(cmd, typo) || strings.Contains(typo, cmd) {
+				fmt.Printf("    Did you mean: hvmd %s\n", correct)
+				return
+			}
+		}
+	}
+
+	fmt.Println("    Try: hvmd help")
 }

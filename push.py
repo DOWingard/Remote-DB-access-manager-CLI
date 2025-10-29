@@ -26,7 +26,7 @@ DEST_DIR.mkdir(parents=True, exist_ok=True)
 # --- Files/folders actually needed for ping ---
 FILES_TO_COPY = [
     "hvmd.exe",  # compiled Go binary
-    ".env",      # environment file
+    ".env",      # environment file 
    # "scripts",   # batch scripts like pingDB.bat
 ]
 
